@@ -20,17 +20,24 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from homeassistant.components.radio_frequency import async_send_command
+from homeassistant.components.radio_frequency import (
+    ModulationType,
+    async_get_transmitters,
+    async_send_command,
+)
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .const import DOMAIN
 from .protocol import ProflameCommand, Remote, State, decode_frame
 from .receiver import FrameSource
 
 _LOGGER = logging.getLogger(__name__)
 
 _STORE_VERSION = 1
+TRANSMIT_TUNING_RANGE = 10_000_000
 
 
 class Origin(StrEnum):
@@ -88,6 +95,7 @@ class ProflameDevice:
         self.transmitter = transmitter
         self.remote = remote
         self.frequency = frequency
+        self._transmit_frequency_override: int | None = None
         self.state = State()
         #: When the auto-off timer should fire, if one is armed. Persisted so
         #: a restart cannot quietly drop it and leave the fire burning.
@@ -123,6 +131,14 @@ class ProflameDevice:
         blower and light off as a side effect of adjusting the flame.
         """
         if (stored := await self._store.async_load()) is not None:
+            override = stored.get("transmit_frequency_override")
+            self._transmit_frequency_override = (
+                override
+                if type(override) is int
+                and abs(override - self.frequency) <= TRANSMIT_TUNING_RANGE
+                and override != self.frequency
+                else None
+            )
             try:
                 self.state = State(
                     power=bool(stored["power"]),
@@ -259,7 +275,7 @@ class ProflameDevice:
         of an hour later by something whose whole purpose is to change nothing.
         """
         target = self.state.evolve(**{"thermostat": False, **changes})
-        command = ProflameCommand(self.remote, target, frequency=self.frequency)
+        command = ProflameCommand(self.remote, target, frequency=self.transmit_frequency)
 
         # At info, and naming what changed. Several things can command this
         # appliance — the switch, the slider, the thermostat, a timer — and
@@ -283,6 +299,36 @@ class ProflameDevice:
 
         self.last_success = dt_util.utcnow()
         await self._async_adopt(target, origin)
+
+    @property
+    def transmit_frequency(self) -> int:
+        """The tuned transmit frequency, defaulting to the configured band."""
+        return self._transmit_frequency_override or self.frequency
+
+    async def async_set_transmit_frequency(self, frequency: int) -> None:
+        """Validate and remember TX tuning without touching appliance state."""
+        if type(frequency) is not int or abs(frequency - self.frequency) > TRANSMIT_TUNING_RANGE:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="transmit_frequency_out_of_range",
+            )
+        try:
+            supported = self.transmitter in async_get_transmitters(
+                self.hass, frequency, ModulationType.OOK
+            )
+        except HomeAssistantError as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="transmit_frequency_unsupported",
+            ) from err
+        if not supported:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="transmit_frequency_unsupported",
+            )
+        self._transmit_frequency_override = frequency if frequency != self.frequency else None
+        await self._async_save()
+        # State listeners can schedule RF reconciliation. Tuning alone must not.
 
     async def async_set_auto_off(self, deadline: datetime | None) -> None:
         """Remember when the fire should be put out, or that it should not."""
@@ -309,6 +355,7 @@ class ProflameDevice:
                 "front": int(state.front),
                 "pilot": int(state.pilot),
                 "auto_off_at": self.auto_off_at.isoformat() if self.auto_off_at else None,
+                "transmit_frequency_override": self._transmit_frequency_override,
             }
         )
 

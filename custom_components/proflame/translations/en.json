@@ -41,13 +41,16 @@
       "reconfigure_successful": "The fireplace now uses the new radios."
     },
     "progress": {
-      "listening": "Listening. Press any button on the fireplace handset now — this only reads what the handset transmits and changes nothing about the appliance."
+      "listening": "Listening. Press any button on the fireplace handset now \u2014 this only reads what the handset transmits and changes nothing about the appliance."
     }
   },
   "entity": {
     "number": {
       "flame": {
         "name": "Flame"
+      },
+      "transmit_frequency": {
+        "name": "Transmit frequency"
       }
     },
     "fan": {
@@ -119,6 +122,14 @@
           "reconcile_interval": "Minutes of radio silence before the believed state is transmitted again."
         }
       }
+    }
+  },
+  "exceptions": {
+    "transmit_frequency_out_of_range": {
+      "message": "Transmit frequency must be within 100 kHz of the configured nominal band."
+    },
+    "transmit_frequency_unsupported": {
+      "message": "The configured transmitter does not support the requested frequency with OOK modulation."
     }
   }
 }
